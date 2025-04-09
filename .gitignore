@@ -5,3 +5,4 @@
 .vscode/ipch
 .git
 .DS_Store
+.logs
