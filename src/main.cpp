@@ -2,7 +2,7 @@
 #include <printf.h>
 #include <SPI.h>
 #include <RF24.h>
-#include "test_data.h"
+// #include "test_data.h"
 
 typedef enum tx_state_t {
     TX_SENDING_HANDSHAKE,
@@ -30,7 +30,8 @@ typedef struct connection_t {
 } connection_t;
 
 uint16_t computeCRC16(const uint8_t *data, size_t length);
-void makePayload(uint8_t * buf, uint8_t len, const uint8_t pkt_id, const uint8_t pkt_data, bool zero_padding = false);
+void makePayload(uint8_t * buf, const uint8_t len, const uint8_t pkt_id, const uint8_t pkt_data, bool zero_padding = false);
+void makeRandomPacket(uint8_t * buf, const uint8_t len, const uint8_t pkt_id, const uint8_t randMin, const uint8_t randMax);
 void makeHandshake(uint8_t * buf, const uint8_t len, const connection_t * conn);
 bool decodeHandshake(const uint8_t * buf, const uint8_t len, connection_t * conn);
 void resetRadio(bool power_reset = true);
@@ -86,18 +87,11 @@ rf24_datarate_e dr_setting = RF24_250KBPS;
 uint8_t channel = NRF24_CHANNEL;
 uint32_t rx_pkt_count_expected = 0;
 uint32_t rx_data_timeout = 0;
-
-#ifdef ESP32_ENDPOINT
-bool is_tx_endpoint = true;
-bool is_rx_endpoint = false;
-uint8_t addr_selector_txpipe = 1;
-uint8_t addr_selector_rxpipe = 0;
-#elif defined(ARDUNANO_ENDPOINT)
 bool is_tx_endpoint = false;
-bool is_rx_endpoint = true;
+bool is_rx_endpoint = false;
 uint8_t addr_selector_txpipe = 0;
 uint8_t addr_selector_rxpipe = 1;
-#endif
+uint16_t delay_repeat = 10;
 
 int queryNumber(void) {
     int retval = -1;
@@ -116,6 +110,43 @@ int queryNumber(void) {
         }
     }
     return retval;
+}
+void queryEndpoint(void) {
+    Serial.println(F("=== Endpoint settings:"));
+    Serial.println(F("=== 0  : RX (default)."));
+    Serial.println(F("=== 1  : TX."));
+    Serial.print(F(">>> Enter endpoint setting: "));
+    int q = queryNumber();
+    if(q >= 1) {
+        is_tx_endpoint = true;
+        is_rx_endpoint = false;
+        addr_selector_txpipe = 1;
+        addr_selector_rxpipe = 0;
+        Serial.println(F("=== Endpoint is TX"));
+    } else {
+        is_tx_endpoint = false;
+        is_rx_endpoint = true;
+        addr_selector_txpipe = 0;
+        addr_selector_rxpipe = 1;
+        Serial.println(F("=== Endpoint is RX"));
+    }
+    if(is_tx_endpoint) {
+        Serial.println(F("=== Stream repeat delay:"));
+        Serial.println(F("===  0 : No delay performed, user is requested to confirm."));
+        Serial.println(F("=== 10 : Ten seconds of felay, automatic repeat (default)."));
+        Serial.println(F("===    : Enter a different positive integer to configure the delay in seconds."));
+        Serial.print(F(">>> Enter repeat delay: "));
+        int q = queryNumber();
+        if(q > 0) {
+            delay_repeat = q;
+            Serial.print(F("=== Automatic repetition after "));
+            Serial.print(delay_repeat);
+            Serial.println(F(" seconds."));
+        } else if(q <= 0) {
+            delay_repeat = 0;
+            Serial.println(F("=== Endpoint will be locked and request user to confirm."));
+        }
+    }
 }
 void queryChannel(void) {
     Serial.println(F("=== Channel limits: 2.4 GHz -- 2.525 GHz"));
@@ -282,6 +313,7 @@ void setup() {
         Serial.println(F("=== NRF24L01 chip NOT connected."));
     }
 
+    queryEndpoint();
     queryChannel();
     queryRadioConfig();
     
@@ -389,25 +421,15 @@ void loop() {
                 timestamp = micros();
                 uint32_t pkt_error = 0;
                 uint32_t pkt_sent = 0;
-                uint16_t pkt_count = STREAM_PKT_COUNT;
+                uint16_t pkt_count = tx_connection.pkt_count;
                 int8_t progress_helper = -1;
-                const uint32_t stream_size = pkt_count * STREAM_REPEAT;
-                for(size_t stream_id = 0; stream_id < STREAM_REPEAT; stream_id++) {
-                    int8_t progress = 100 * pkt_sent / stream_size;
-                    if(progress % 10 == 0 && progress_helper < progress) {
-                        Serial.print(F("=== Sending packets... "));
-                        Serial.print(progress);
-                        Serial.print(F("% ("));
-                        Serial.print(pkt_sent);
-                        Serial.print(F(" of "));
-                        Serial.print(stream_size);
-                        Serial.println(F(")"));
-                        progress_helper = progress;
-                    }
+                const uint32_t stream_size = pkt_count * tx_connection.stream_repeat;
+                for(size_t stream_id = 0; stream_id < tx_connection.stream_repeat; stream_id++) {
                     for(size_t pkt_id = 0; pkt_id < pkt_count; pkt_id++) {
                         digitalWrite(LED, HIGH);
-                        rf_buf[0] = pkt_id;
-                        memcpy(rf_buf + 1, data[pkt_id], NRF24_BUFSIZE - 1);
+                        // rf_buf[0] = pkt_id;
+                        // memcpy(rf_buf + 1, data[pkt_id], NRF24_BUFSIZE - 1);
+                        makeRandomPacket(rf_buf, NRF24_BUFSIZE, pkt_id, 65, 90);
                         if(!radio.writeFast(rf_buf, NRF24_BUFSIZE)) {
                             digitalWrite(LED, LOW);
                             Serial.print(F("=== TX ERROR: sending data failed (PKT ID: "));
@@ -417,6 +439,18 @@ void loop() {
                         } else {
                             digitalWrite(LED, LOW);
                             pkt_sent++;
+
+                            if(pkt_sent % 250 == 0) {
+                                int8_t progress = 100 * pkt_sent / stream_size;
+                                Serial.print(F("=== Sending packets... "));
+                                Serial.print(progress);
+                                Serial.print(F("% ("));
+                                Serial.print(pkt_sent);
+                                Serial.print(F(" of "));
+                                Serial.print(stream_size);
+                                Serial.println(F(")"));
+                                progress_helper = progress;
+                            }
                         }
                     }
                 }
@@ -441,19 +475,31 @@ void loop() {
             }
             break;
 
-        case TX_DATA_COMPLETE: {
+        case TX_DATA_COMPLETE: 
+            {
                 Serial.println(F("=== Restarting operations."));
                 resetRadio();
                 radio.stopListening();  // Put radio in TX mode.
-                Serial.print(F(">>> Repeat transfer? (yes/default:1, no:0) : "));
-                int query = queryNumber();
-                if(query == 0) {
-                    Serial.print(F(">>> Change radio config.? (yes:1, no/default:0) : "));
-                    query = queryNumber();
-                    if(query == 1) {
-                        queryRadioConfig();
+
+                if(delay_repeat > 0) {
+                    Serial.print(F("=== Waiting for "));
+                    Serial.print(delay_repeat);
+                    Serial.println(F(" seconds..."));
+                    delay(delay_repeat * 1000);
+                } else {
+                    Serial.print(F(">>> Repeat transfer? (yes/default:1, no:0) : "));
+                    int query = queryNumber();
+                    if(query == 0) {
+                        Serial.print(F(">>> Change radio config.? (yes:1, no/default:0) : "));
+                        query = queryNumber();
+                        if(query == 1) {
+                            queryEndpoint();
+                            queryRadioConfig();
+                            if(is_tx_endpoint) {
+                                queryStreamConfig();
+                            }
+                        }
                     }
-                    queryStreamConfig();
                 }
                 tx_state = TX_SENDING_HANDSHAKE;
             }
@@ -559,7 +605,7 @@ void loop() {
                 while(!rx_started) {
                     if(radio.available()) {
                         radio.read(rf_buf, NRF24_BUFSIZE);
-                        uint16_t crc_rx = computeCRC16(rf_buf + 1, NRF24_BUFSIZE - 3);
+                        uint16_t crc_rx = computeCRC16(rf_buf, NRF24_BUFSIZE - 2);
                         uint8_t crc_msb = rf_buf[30];
                         uint8_t crc_lsb = rf_buf[31];
                         uint16_t crc_pkt = (crc_msb << 8) + crc_lsb;
@@ -621,7 +667,7 @@ void loop() {
                     }
                     no_timeout = (timeout_counter < TIMEOUT_RX_REPEAT);
                     uint8_t progress = 100.0 * (double)pkt_count / (double)rx_pkt_count_expected; // Estimated.
-                    if(pkt_count % (1000 + random(100, 500)) == 0) {
+                    if(pkt_count % 250 == 0) {
                         digitalWrite(LED, HIGH);
                         double mbps = ((double)pkt_rcv * rx_connection.frame_size * 8.0) / (double)(micros() - rx_transfer_time);
                         char str[150];
@@ -712,7 +758,7 @@ uint16_t computeCRC16(const uint8_t *data, size_t length) {
     for(size_t i = 0; i < length; i++) {
         crc ^= (data[i] << 8);
         for(uint8_t j = 0; j < 8; j++) {
-            if (crc & 0x8000) {
+            if(crc & 0x8000U) {
                 crc = (crc << 1) ^ CRC16_POLY;
             } else {
                 crc <<= 1;
@@ -722,7 +768,7 @@ uint16_t computeCRC16(const uint8_t *data, size_t length) {
     return crc;
 }
 
-void makePayload(uint8_t * buf, uint8_t len, const uint8_t pkt_id, const uint8_t pkt_data, bool zero_padding) {
+void makePayload(uint8_t * buf, const uint8_t len, const uint8_t pkt_id, const uint8_t pkt_data, bool zero_padding) {
     if(len < 4) {
         return;
     }
@@ -733,6 +779,19 @@ void makePayload(uint8_t * buf, uint8_t len, const uint8_t pkt_id, const uint8_t
     buf[1] = pkt_data;
     buf[len - 1] = 0x00; // No CRC
     buf[len - 2] = 0x00; // No CRC
+}
+
+void makeRandomPacket(uint8_t * buf, const uint8_t len, const uint8_t pkt_id, const uint8_t randMin, const uint8_t randMax) {
+    if(len < 4) {
+        return;
+    }
+    buf[0] = pkt_id;
+    for(uint8_t i = 2; i < len - 2; i++) {
+        buf[i] = random(randMin, randMax);
+    }
+    uint16_t crc_word = computeCRC16(buf, len - 2);
+    buf[len - 2] = (crc_word >> 8) & 0xFF;
+    buf[len - 1] = (crc_word >> 0) & 0xFF;
 }
 
 void makeHandshake(uint8_t * buf, const uint8_t len, const connection_t * conn) {
@@ -816,12 +875,12 @@ void resetRadio(bool power_reset) {
     }
 
     // Reapply configurations
-    radio.setPALevel(RF24_PA_MIN);
-    radio.setChannel(NRF24_CHANNEL);
-    radio.setDataRate(RF24_250KBPS);
-    radio.setCRCLength(RF24_CRC_16);
+    radio.setPALevel(pa_setting);
+    radio.setChannel(channel);
+    radio.setDataRate(dr_setting);
+    radio.setCRCLength(tx_connection.hw_crc);
     radio.setPayloadSize(NRF24_BUFSIZE);
-    radio.setAutoAck(false);
+    radio.setAutoAck(tx_connection.auto_ack_enabled);
     radio.openWritingPipe(addr[addr_selector_txpipe]);
     radio.openReadingPipe(1, addr[addr_selector_rxpipe]);
 
