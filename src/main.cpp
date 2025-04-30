@@ -611,17 +611,23 @@ void loop() {
                         uint8_t crc_msb = rf_buf[30];
                         uint8_t crc_lsb = rf_buf[31];
                         uint16_t crc_pkt = (crc_msb << 8) + crc_lsb;
-                        if(crc_pkt == crc_rx) {
+                        if(crc_pkt == crc_rx && rf_buf[0] != 0) {
                             // First successful reception of a packet.
                             pkt_rcv++;
                             pkt_count++;
                             prev_pkt_id = rf_buf[0];
                             Serial.print(F("=== Data transfer stream started with Packet ID: "));
                             Serial.println(prev_pkt_id);
-                        } else {
+                        } else if(crc_pkt != crc_rx) {
                             pkt_error++;
                             pkt_count++;
                             Serial.println(F("=== RX ERROR: Data transfer stream started with wrong CRC."));
+                        } else {
+                            // rf_buf == 0:
+                            Serial.println(F("=== Data transfer not started. Control packet received (skipping)."));
+                            Serial.println(F("=== RX ERROR: data transfer start timed out."));
+                            rx_state = RX_WAITING_HANDSHAKE;
+                            break;
                         }
                         rx_started = true;
                         timestamp = micros();
@@ -633,7 +639,7 @@ void loop() {
                 }
                 bool no_timeout = true;
                 uint8_t timeout_counter = 0;
-                int8_t progress_helper = -1;
+                bool pkt_count_trigger_print = false;
                 while(rx_started && no_timeout) {
                     // Receiving a stream of packets:
                     if(pkt_rcv >= rx_pkt_count_expected) break;
@@ -647,6 +653,7 @@ void loop() {
                             pkt_error++;
                         }
                         pkt_count++;
+                        pkt_count_trigger_print = (pkt_count % 250 == 0);
                         uint32_t remaining = rx_pkt_count_expected - pkt_count;
                         rx_data_timeout = remaining * TIMEOUT_RX_SINGLE;
                         timestamp = micros();
@@ -654,22 +661,12 @@ void loop() {
                     }
                     if((micros() - timestamp) > rx_data_timeout) {
                         timeout_counter++;
-                        /*
-                        Serial.print(F("=== RX ERROR: reception timedout after "));
-                        Serial.print(rx_data_timeout / 1000.0);
-                        Serial.print(F(" seconds. ("));
-                        Serial.print(timeout_counter);
-                        Serial.print(F("/"));
-                        Serial.print(TIMEOUT_RX_REPEAT);
-                        Serial.println(F(")"));
-                        */
                         timestamp = micros();
-                        // resetRadio(true); // Reset without powering down/up.
                         radio.startListening();
                     }
                     no_timeout = (timeout_counter < TIMEOUT_RX_REPEAT);
                     uint8_t progress = 100.0 * (double)pkt_count / (double)rx_pkt_count_expected; // Estimated.
-                    if(pkt_count % 250 == 0 && progress_helper != pkt_count) {
+                    if(pkt_count_trigger_print) {
                         digitalWrite(LED, HIGH);
                         double mbps = ((double)pkt_rcv * rx_connection.frame_size * 8.0) / (double)(micros() - rx_transfer_time);
                         char str[150];
@@ -682,7 +679,7 @@ void loop() {
                         Serial.print(str);
                         Serial.print(mbps);
                         Serial.println(F(" Mbps)"));
-                        progress_helper = pkt_count;
+                        pkt_count_trigger_print = false;
                         digitalWrite(LED, LOW);
                     }
                 }
