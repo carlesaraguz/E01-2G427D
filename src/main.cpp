@@ -35,6 +35,7 @@ void makeRandomPacket(uint8_t * buf, const uint8_t len, const uint8_t pkt_id, co
 void makeHandshake(uint8_t * buf, const uint8_t len, const connection_t * conn);
 bool decodeHandshake(const uint8_t * buf, const uint8_t len, connection_t * conn);
 void resetRadio(bool power_reset = true);
+void printPacket(const uint8_t * buf, const uint8_t len);
 
 /* Set which endpoint are you loading to code to: (automatically set by Platform IO env.) */
 // #define ESP32_ENDPOINT
@@ -430,6 +431,7 @@ void loop() {
                         // rf_buf[0] = pkt_id;
                         // memcpy(rf_buf + 1, data[pkt_id], NRF24_BUFSIZE - 1);
                         makeRandomPacket(rf_buf, NRF24_BUFSIZE, pkt_id, 65, 90);
+                        // printPacket(rf_buf, NRF24_BUFSIZE + 1);
                         if(!radio.writeFast(rf_buf, NRF24_BUFSIZE)) {
                             digitalWrite(LED, LOW);
                             Serial.print(F("=== TX ERROR: sending data failed (PKT ID: "));
@@ -637,7 +639,7 @@ void loop() {
                     if(pkt_rcv >= rx_pkt_count_expected) break;
                     if(radio.available()) {
                         radio.read(rf_buf, NRF24_BUFSIZE);
-                        uint16_t crc_rx = computeCRC16(rf_buf + 1, NRF24_BUFSIZE - 3);
+                        uint16_t crc_rx = computeCRC16(rf_buf, NRF24_BUFSIZE - 2);
                         uint16_t crc_pkt = (rf_buf[30] << 8) + rf_buf[31];
                         if(crc_pkt == crc_rx) {
                             pkt_rcv++;
@@ -667,7 +669,7 @@ void loop() {
                     }
                     no_timeout = (timeout_counter < TIMEOUT_RX_REPEAT);
                     uint8_t progress = 100.0 * (double)pkt_count / (double)rx_pkt_count_expected; // Estimated.
-                    if(pkt_count % 250 == 0) {
+                    if(pkt_count % 250 == 0 && progress_helper != pkt_count) {
                         digitalWrite(LED, HIGH);
                         double mbps = ((double)pkt_rcv * rx_connection.frame_size * 8.0) / (double)(micros() - rx_transfer_time);
                         char str[150];
@@ -680,7 +682,7 @@ void loop() {
                         Serial.print(str);
                         Serial.print(mbps);
                         Serial.println(F(" Mbps)"));
-                        progress_helper = progress;
+                        progress_helper = pkt_count;
                         digitalWrite(LED, LOW);
                     }
                 }
@@ -786,12 +788,12 @@ void makeRandomPacket(uint8_t * buf, const uint8_t len, const uint8_t pkt_id, co
         return;
     }
     buf[0] = pkt_id;
-    for(uint8_t i = 2; i < len - 2; i++) {
+    for(uint8_t i = 1; i < len - 2; i++) {
         buf[i] = random(randMin, randMax);
     }
     uint16_t crc_word = computeCRC16(buf, len - 2);
-    buf[len - 2] = (crc_word >> 8) & 0xFF;
-    buf[len - 1] = (crc_word >> 0) & 0xFF;
+    buf[len - 2] = (crc_word >> 8) & 0xFF;  // 32 - 2 = 30
+    buf[len - 1] = (crc_word >> 0) & 0xFF;  // 32 - 1 = 31
 }
 
 void makeHandshake(uint8_t * buf, const uint8_t len, const connection_t * conn) {
@@ -889,4 +891,17 @@ void resetRadio(bool power_reset) {
     radio.flush_rx();
 
     Serial.println(F("=== nRF24L01 radio reset complete."));
+}
+
+void printPacket(const uint8_t * buf, const uint8_t len) {
+    Serial.print(buf[0], HEX);
+    Serial.print(F(" : "));
+    for(uint8_t i = 1; i < len - 3; i++) {
+        Serial.print((char)(buf[i]));
+    }
+    Serial.print(buf[len - 3], HEX); // CRC MSB
+    Serial.print(F(","));
+    Serial.print(buf[len - 2], HEX); // CRC LSB
+    Serial.print(F(","));
+    Serial.println(buf[len - 1], HEX); // null
 }
